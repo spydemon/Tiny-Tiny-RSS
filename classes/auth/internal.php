@@ -63,6 +63,12 @@ class Auth_Internal extends Auth_Base {
 				login = '$login'");
 
 			if (db_num_rows($result) != 1) {
+				//Syslog manager 
+				if ($login != null) {
+					//We log only if the user try a login
+					openlog('web-ttrss('.$_SERVER['HTTP_HOST'].')',LOG_NDELAY|LOG_PID,LOG_AUTH);
+					syslog(LOG_NOTICE,"Authentication failure for $login from {$_SERVER['REMOTE_ADDR']}");
+				}
 				return false;
 			}
 
@@ -93,6 +99,10 @@ class Auth_Internal extends Auth_Base {
 						login = '$login' AND pwd_hash = '$pwd_hash'";
 
 				} else {
+					//Syslog manager 
+					openlog('web-ttrss('.$_SERVER['HTTP_HOST'].')',LOG_NDELAY|LOG_PID,LOG_AUTH);
+					syslog(LOG_NOTICE,"Authentication failure for $login from {$_SERVER['REMOTE_ADDR']}");
+
 					return false;
 				}
 
@@ -116,8 +126,16 @@ class Auth_Internal extends Auth_Base {
 		$result = db_query($this->link, $query);
 
 		if (db_num_rows($result) == 1) {
+			//Syslog manager 
+			openlog('web-ttrss('.$_SERVER['HTTP_HOST'].')',LOG_NDELAY|LOG_PID,LOG_AUTH);
+			syslog(LOG_INFO,"Accepted password for $login from {$_SERVER['REMOTE_ADDR']}");
+
 			return db_fetch_result($result, 0, "id");
 		}
+
+		//Syslog manager 
+		openlog('web-ttrss('.$_SERVER['HTTP_HOST'].')',LOG_NDELAY|LOG_PID,LOG_AUTH);
+		syslog(LOG_NOTICE,"Authentication failure for $login from {$_SERVER['REMOTE_ADDR']}");
 
 		return false;
 	}
