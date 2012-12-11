@@ -1,6 +1,6 @@
 <?php
-	set_include_path(get_include_path() . PATH_SEPARATOR .
-		dirname(__FILE__) . "/include");
+	set_include_path(dirname(__FILE__) ."/include" . PATH_SEPARATOR .
+		get_include_path());
 
 	require_once "functions.php";
 	require_once "sessions.php";
@@ -26,7 +26,7 @@
 	"http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
 <html>
 <head>
-	<title>Tiny Tiny RSS : Preferences</title>
+	<title>Tiny Tiny RSS : <?php echo __("Preferences") ?></title>
 	<link rel="stylesheet" type="text/css" href="lib/dijit/themes/claro/claro.css"/>
 	<link rel="stylesheet" type="text/css" href="tt-rss.css?<?php echo $dt_add ?>"/>
 

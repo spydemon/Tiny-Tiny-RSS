@@ -157,6 +157,7 @@
 
 	} // function update_daemon_common
 
+	// ignore_daemon is not used
 	function update_rss_feed($link, $feed, $ignore_daemon = false, $no_cache = false,
 		$override_url = false) {
 
@@ -166,35 +167,15 @@
 
 		$debug_enabled = defined('DAEMON_EXTENDED_DEBUG') || $_REQUEST['xdebug'];
 
-		if (!$_REQUEST["daemon"] && !$ignore_daemon) {
-			return false;
-		}
-
 		if ($debug_enabled) {
 			_debug("update_rss_feed: start");
 		}
 
-		if (!$ignore_daemon) {
-
-			if (DB_TYPE == "pgsql") {
-					$updstart_thresh_qpart = "(ttrss_feeds.last_update_started IS NULL OR ttrss_feeds.last_update_started < NOW() - INTERVAL '120 seconds')";
-				} else {
-					$updstart_thresh_qpart = "(ttrss_feeds.last_update_started IS NULL OR ttrss_feeds.last_update_started < DATE_SUB(NOW(), INTERVAL 120 SECOND))";
-				}
-
-			$result = db_query($link, "SELECT id,update_interval,auth_login,
-				auth_pass,cache_images,update_method,last_updated
-				FROM ttrss_feeds WHERE id = '$feed' AND $updstart_thresh_qpart");
-
-		} else {
-
-			$result = db_query($link, "SELECT id,update_interval,auth_login,
-				feed_url,auth_pass,cache_images,update_method,last_updated,
-				mark_unread_on_update, owner_uid, update_on_checksum_change,
-				pubsub_state
-				FROM ttrss_feeds WHERE id = '$feed'");
-
-		}
+		$result = db_query($link, "SELECT id,update_interval,auth_login,
+			feed_url,auth_pass,cache_images,update_method,last_updated,cache_content,
+			mark_unread_on_update, owner_uid, update_on_checksum_change,
+			pubsub_state
+			FROM ttrss_feeds WHERE id = '$feed'");
 
 		if (db_num_rows($result) == 0) {
 			if ($debug_enabled) {
@@ -240,6 +221,7 @@
 		}
 
 		$cache_images = sql_bool_to_bool(db_fetch_result($result, 0, "cache_images"));
+		$cache_content = sql_bool_to_bool(db_fetch_result($result, 0, "cache_content"));
 		$fetch_url = db_fetch_result($result, 0, "feed_url");
 
 		$feed = db_escape_string($feed);
@@ -416,6 +398,23 @@
 				_debug("update_rss_feed: " . count($filters) . " filters loaded.");
 			}
 
+			$filter_plugins = array();
+
+			if (defined('_ARTICLE_FILTER_PLUGINS')) {
+				foreach (explode(",", _ARTICLE_FILTER_PLUGINS) as $p) {
+					$pclass = "filter_" . trim($p);
+
+					if (class_exists($pclass)) {
+						$plugin = new $pclass($link);
+						array_push($filter_plugins, $plugin);
+					}
+				}
+			}
+
+			if ($debug_enabled) {
+				_debug("update_rss_feed: " . count($filter_plugins) . " filter plugins loaded.");
+			}
+
 			if ($use_simplepie) {
 				$iterator = $rss->get_items();
 			} else {
@@ -524,6 +523,14 @@
 					if (!$entry_guid) $entry_guid = make_guid_from_title($item["title"]);
 				}
 
+				if ($cache_content) {
+					$entry_guid = "ccache:$entry_guid";
+				}
+
+				if ($auth_login || $auth_pass) {
+					$entry_guid = "auth,$owner_uid:$entry_guid";
+				}
+
 				if ($debug_enabled) {
 					_debug("update_rss_feed: guid $entry_guid");
 				}
@@ -624,6 +631,7 @@
 				}
 
 				$entry_content_unescaped = $entry_content;
+				$entry_cached_content = "";
 
 				if ($use_simplepie) {
 					$entry_comments = strip_tags($item->data["comments"]);
@@ -667,8 +675,6 @@
 					WHERE guid = '$entry_guid'");
 
 				$entry_content = db_escape_string($entry_content, false);
-
-				$content_hash = "SHA1:" . sha1(strip_tags($entry_content));
 
 				$entry_title = db_escape_string($entry_title);
 				$entry_link = db_escape_string($entry_link);
@@ -774,12 +780,50 @@
 					_debug("update_rss_feed: done collecting data [TITLE:$entry_title]");
 				}
 
+				// TODO: less memory-hungry implementation
+				if (count($filter_plugins) > 0) {
+					if ($debug_enabled) {
+						_debug("update_rss_feed: applying plugin filters...");
+					}
+
+					$article = array("owner_uid" => $owner_uid,
+						"title" => $entry_title,
+						"content" => $entry_content,
+						"link" => $entry_link,
+						"tags" => $entry_tags,
+						"author" => $entry_author);
+
+					foreach ($filter_plugins as $plugin) {
+						$article = $plugin->filter_article($article);
+					}
+
+					$entry_title = $article["title"];
+					$entry_content = $article["content"];
+					$entry_tags = $article["tags"];
+					$entry_author = $article["author"];
+				}
+
+				$content_hash = "SHA1:" . sha1(strip_tags($entry_content));
+
 				db_query($link, "BEGIN");
 
 				if (db_num_rows($result) == 0) {
 
 					if ($debug_enabled) {
 						_debug("update_rss_feed: base guid not found");
+					}
+
+					if ($cache_content) {
+						if ($debug_enabled) {
+							_debug("update_rss_feed: caching content (initial)...");
+						}
+
+						$entry_cached_content = cache_content($link, $entry_link, $auth_login, $auth_pass);
+
+						if ($cache_images && is_writable(CACHE_DIR . '/images'))
+							$entry_cached_content = cache_images($entry_cached_content, $site_url, $debug_enabled);
+
+						$entry_cached_content = db_escape_string($entry_cached_content, false);
 					}
 
 					// base post entry does not exist, create it
@@ -792,6 +836,7 @@
 							updated,
 							content,
 							content_hash,
+							cached_content,
 							no_orig_date,
 							date_updated,
 							date_entered,
@@ -805,6 +850,7 @@
 							'$entry_timestamp_fmt',
 							'$entry_content',
 							'$content_hash',
+							'$entry_cached_content',
 							$no_orig_date,
 							NOW(),
 							NOW(),
@@ -834,7 +880,7 @@
 						id,content_hash,no_orig_date,title,
 						".SUBSTRING_FOR_DATE."(date_updated,1,19) as date_updated,
 						".SUBSTRING_FOR_DATE."(updated,1,19) as updated,
-						num_comments
+						num_comments, cached_content
 					FROM
 						ttrss_entries
 					WHERE guid = '$entry_guid'");
@@ -852,6 +898,7 @@
 					$orig_content_hash = db_fetch_result($result, 0, "content_hash");
 					$orig_title = db_fetch_result($result, 0, "title");
 					$orig_num_comments = db_fetch_result($result, 0, "num_comments");
+					$orig_cached_content = trim(db_fetch_result($result, 0, "cached_content"));
 					$orig_date_updated = strtotime(db_fetch_result($result,
 						0, "date_updated"));
 
@@ -987,6 +1034,7 @@
 
 					$post_needs_update = false;
 					$update_insignificant = false;
+					$cached_content_needs_update = false;
 
 					if ($orig_num_comments != $num_comments) {
 						$post_needs_update = true;
@@ -996,6 +1044,27 @@
 					if ($content_hash != $orig_content_hash) {
 						$post_needs_update = true;
 						$update_insignificant = false;
+						$cached_content_needs_update = true;
+					}
+
+					if ($cache_content) {
+						if ($debug_enabled) {
+							_debug("update_rss_feed: caching content because original checksum changed...");
+						}
+
+						$entry_cached_content = cache_content($link, $entry_link, $auth_login, $auth_pass);
+
+						if ($entry_cached_content) {
+							if ($cache_images && is_writable(CACHE_DIR . '/images'))
+								$entry_cached_content = cache_images($entry_cached_content, $site_url, $debug_enabled);
+
+							$entry_cached_content = db_escape_string($entry_cached_content, false);
+							$post_needs_update = true;
+						} else {
+							$entry_cached_content = db_escape_string($orig_cached_content);
+						}
+					} else {
+						$entry_cached_content = db_escape_string($orig_cached_content);
 					}
 
 					if (db_escape_string($orig_title) != $entry_title) {
@@ -1016,6 +1085,7 @@
 						db_query($link, "UPDATE ttrss_entries
 							SET title = '$entry_title', content = '$entry_content',
 								content_hash = '$content_hash',
+								cached_content = '$entry_cached_content',
 								updated = '$entry_timestamp_fmt',
 								num_comments = '$num_comments'
 							WHERE id = '$ref_id'");
@@ -1388,9 +1458,15 @@
 					$match = @preg_match("/$reg_exp/i", $title);
 					break;
 				case "content":
+					// we don't need to deal with multiline regexps
+					$content = preg_replace("/[\r\n\t]/", "", $content);
+
 					$match = @preg_match("/$reg_exp/i", $content);
 					break;
 				case "both":
+					// we don't need to deal with multiline regexps
+					$content = preg_replace("/[\r\n\t]/", "", $content);
+
 					$match = (@preg_match("/$reg_exp/i", $title) || @preg_match("/$reg_exp/i", $content));
 					break;
 				case "link":
@@ -1477,5 +1553,26 @@
 				}
 			}
 		}
+	}
+
+	function cache_content($link, $url, $login, $pass) {
+
+		$content = fetch_file_contents($url, $login, $pass);
+
+		if ($content) {
+			$doc = new DOMDocument();
+			@$doc->loadHTML($content);
+			$xpath = new DOMXPath($doc);
+
+			$node = $doc->getElementsByTagName('body')->item(0);
+
+			if ($node) {
+				$content = $doc->saveXML($node, LIBXML_NOEMPTYTAG);
+
+				return $content;
+			}
+		}
+
+		return "";
 	}
 ?>

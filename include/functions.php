@@ -1,17 +1,25 @@
 <?php
 	define('EXPECTED_CONFIG_VERSION', 26);
-	define('SCHEMA_VERSION', 98);
+	define('SCHEMA_VERSION', 99);
 
 	$fetch_last_error = false;
 
 	function __autoload($class) {
 		$class_file = str_replace("_", "/", strtolower(basename($class)));
 
+		$file = dirname(__FILE__)."/../plugins/$class_file.php";
+
+		if (file_exists($file)) {
+			require $file;
+			return;
+		}
+
 		$file = dirname(__FILE__)."/../classes/$class_file.php";
 
 		if (file_exists($file)) {
 			require $file;
 		}
+
 	}
 
 	mb_internal_encoding("UTF-8");
@@ -70,14 +78,11 @@
 			$lang = _TRANSLATION_OVERRIDE_DEFAULT;
 		}
 
-		if ($_COOKIE["ttrss_lang"] && $_COOKIE["ttrss_lang"] != "auto") {
-			$lang = $_COOKIE["ttrss_lang"];
-		}
-
 		/* In login action of mobile version */
 		if ($_POST["language"] && defined('MOBILE_VERSION')) {
 			$lang = $_POST["language"];
-			$_COOKIE["ttrss_lang"] = $lang;
+		} else {
+			$lang = $_SESSION["language"];
 		}
 
 		if ($lang) {
@@ -735,90 +740,14 @@
 				/* bump login timestamp */
 				db_query($link, "UPDATE ttrss_users SET last_login = NOW() WHERE id = " .
 					$_SESSION["uid"]);
+			}
 
-				if ($_SESSION["language"] && SESSION_COOKIE_LIFETIME > 0) {
-					setcookie("ttrss_lang", $_SESSION["language"],
-						time() + SESSION_COOKIE_LIFETIME);
-				}
+			if ($_SESSION["uid"] && $_SESSION["language"] && SESSION_COOKIE_LIFETIME > 0) {
+				setcookie("ttrss_lang", $_SESSION["language"],
+					time() + SESSION_COOKIE_LIFETIME);
 			}
 		}
 	}
-
-
-	/* function login_sequence($link, $mobile = false) {
-		$_SESSION["prefs_cache"] = array();
-
-		if (!SINGLE_USER_MODE) {
-
-			$login_action = $_POST["login_action"];
-
-			# try to authenticate user if called from login form
-			if ($login_action == "do_login") {
-				$login = db_escape_string($_POST["login"]);
-				$password = $_POST["password"];
-				$remember_me = $_POST["remember_me"];
-
-				if (authenticate_user($link, $login, $password)) {
-					$_POST["password"] = "";
-
-					$_SESSION["language"] = $_POST["language"];
-					$_SESSION["ref_schema_version"] = get_schema_version($link, true);
-					$_SESSION["bw_limit"] = !!$_POST["bw_limit"];
-
-					if ($_POST["profile"]) {
-
-						$profile = db_escape_string($_POST["profile"]);
-
-						$result = db_query($link, "SELECT id FROM ttrss_settings_profiles
-							WHERE id = '$profile' AND owner_uid = " . $_SESSION["uid"]);
-
-						if (db_num_rows($result) != 0) {
-							$_SESSION["profile"] = $profile;
-							$_SESSION["prefs_cache"] = array();
-						}
-					}
-
-					if ($_REQUEST['return']) {
-						header("Location: " . $_REQUEST['return']);
-					} else {
-						header("Location: " . $_SERVER["REQUEST_URI"]);
-					}
-
-					exit;
-
-					return;
-				} else {
-					$_SESSION["login_error_msg"] = __("Incorrect username or password");
-				}
-			}
-
-			if (!$_SESSION["uid"] || !validate_session($link)) {
-
-				if (AUTH_AUTO_LOGIN && authenticate_user($link, null, null)) {
-				    $_SESSION["ref_schema_version"] = get_schema_version($link, true);
-				} else {
-					 authenticate_user($link, null, null, true);
-				    render_login_form($link, $mobile);
-				    exit;
-				}
-			} else {
-				// bump login timestamp
-				db_query($link, "UPDATE ttrss_users SET last_login = NOW() WHERE id = " .
-					$_SESSION["uid"]);
-
-				if ($_SESSION["language"] && SESSION_COOKIE_LIFETIME > 0) {
-					setcookie("ttrss_lang", $_SESSION["language"],
-						time() + SESSION_COOKIE_LIFETIME);
-				}
-
-				// try to remove possible duplicates from feed counter cache
-//				ccache_cleanup($link, $_SESSION["uid"]);
-			}
-
-		} else {
-			return authenticate_user($link, "admin", null);
-		}
-	} */
 
 	function truncate_string($str, $max_len, $suffix = '&hellip;') {
 		if (mb_strlen($str, "utf-8") > $max_len - 3) {
@@ -2446,7 +2375,7 @@
 				}
 			}
 
-			$content_query_part = "content as content_preview,";
+			$content_query_part = "content as content_preview, cached_content, ";
 
 			if (is_numeric($feed)) {
 
@@ -3190,15 +3119,17 @@
 
 		//if (!$zoom_mode) { print "<article id='$id'><![CDATA["; };
 
-		$result = db_query($link, "SELECT rtl_content, always_display_enclosures FROM ttrss_feeds
+		$result = db_query($link, "SELECT rtl_content, always_display_enclosures, cache_content FROM ttrss_feeds
 			WHERE id = '$feed_id' AND owner_uid = $owner_uid");
 
 		if (db_num_rows($result) == 1) {
 			$rtl_content = sql_bool_to_bool(db_fetch_result($result, 0, "rtl_content"));
 			$always_display_enclosures = sql_bool_to_bool(db_fetch_result($result, 0, "always_display_enclosures"));
+			$cache_content = sql_bool_to_bool(db_fetch_result($result, 0, "cache_content"));
 		} else {
 			$rtl_content = false;
 			$always_display_enclosures = false;
+			$cache_content = false;
 		}
 
 		if ($rtl_content) {
@@ -3225,7 +3156,8 @@
 			tag_cache,
 			author,
 			orig_feed_id,
-			note
+			note,
+			cached_content
 			FROM ttrss_entries,ttrss_user_entries
 			WHERE	id = '$id' AND ref_id = id AND owner_uid = $owner_uid");
 
@@ -3423,6 +3355,10 @@
 				}
 			}
 
+			if ($cache_content && $line["cached_content"] != "") {
+				$line["content"] =& $line["cached_content"];
+			}
+
 			$article_content = sanitize($link, $line["content"], false, $owner_uid,
 				$feed_site_url);
 
@@ -3470,7 +3406,11 @@
 	}
 
 	function get_self_url_prefix() {
-		return SELF_URL_PATH;
+		if (strrpos(SELF_URL_PATH, "/") === strlen(SELF_URL_PATH)-1) {
+			return substr(SELF_URL_PATH, 0, strlen(SELF_URL_PATH)-1);
+		} else {
+			return SELF_URL_PATH;
+		}
 	}
 
 	function opml_publish_url($link){
@@ -4539,6 +4479,11 @@
 				}
 
 				if ($show_content) {
+
+					if ($line["cached_content"] != "") {
+						$line["content_preview"] =& $line["cached_content"];
+					}
+
 					if ($sanitize_content) {
 						$headline_row["content"] = sanitize($link,
 							$line["content_preview"], false, false, $line["site_url"]);
